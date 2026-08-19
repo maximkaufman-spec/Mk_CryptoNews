@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto News -> Telegram bot
-Отправляет одну свежую крипто-новость в Telegram каждые N минут.
+Крипто-новости -> Telegram bot
+Отправляет одну свежую крипто-новость на РУССКОМ в Telegram каждые N минут.
 
-Токен и chat_id берутся из переменных окружения (Railway → Variables):
-  BOT_TOKEN  — токен бота от @BotFather
-  CHAT_ID    — куда слать (узнать у @userinfobot)
-  INTERVAL_SECONDS — (необязательно) интервал в секундах, по умолчанию 120
+Переменные окружения (Railway -> Variables):
+  BOT_TOKEN         - токен бота от @BotFather
+  CHAT_ID           - куда слать (узнать у @userinfobot)
+  INTERVAL_SECONDS  - (необязательно) интервал в секундах, по умолчанию 120
 
-Работает на чистой стандартной библиотеке Python — pip install не нужен.
+Только стандартная библиотека Python — pip install не нужен.
 """
 
 import os
@@ -21,19 +21,17 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 
 # ============ НАСТРОЙКИ ============
-# На Railway задай их во вкладке Variables. Локально можно вписать прямо сюда
-# в кавычки вместо os.environ (второй аргумент — значение по умолчанию).
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 INTERVAL_SECONDS = int(os.environ.get("INTERVAL_SECONDS", "120"))  # 120 = 2 минуты
 
-# RSS-ленты крипто-СМИ (можно добавлять/убирать).
+# РУССКОЯЗЫЧНЫЕ крипто-новостные RSS-ленты.
 FEEDS = [
-    "https://cointelegraph.com/rss",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "https://decrypt.co/feed",
+    "https://ru.cointelegraph.com/rss",   # Cointelegraph на русском
+    "https://forklog.com/feed/",          # ForkLog
+    "https://bits.media/rss/news/",       # Bits.media
 ]
-# ===================================
+# ==================================
 
 USER_AGENT = "Mozilla/5.0 (CryptoNewsBot)"
 seen_links = set()  # уже отправленные новости
