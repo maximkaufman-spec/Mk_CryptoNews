@@ -41,6 +41,9 @@ TOP_N = int(os.environ.get("TOP_N", "10"))
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kiev")
 TZ_OFFSET_HOURS = float(os.environ.get("TZ_OFFSET_HOURS", "3"))
 
+# Если "1"/"true"/"yes" — прислать тестовую подборку сразу при запуске.
+SEND_ON_START = os.environ.get("SEND_ON_START", "").strip().lower() in ("1", "true", "yes", "on")
+
 # РУССКОЯЗЫЧНЫЕ крипто-новостные RSS-ленты.
 FEEDS = [
     "https://ru.cointelegraph.com/rss",   # Cointelegraph на русском
@@ -206,8 +209,16 @@ def main():
                       f"в {times_str} (Киев).")
         print("✅ Тестовое сообщение отправлено.")
     except Exception as e:
-        print(f"❌ Не удалось отправить тестовое сообщение. Проверь BOT_TOKEN и CHAT_ID.\n   {e}")
+        print(f"❌ Не удалось отправить тестовое сообщение. Проверь BOT_TOKEN и CHAT_IDS.\n   {e}")
         return
+
+    # Тестовая подборка сразу при запуске (если включено SEND_ON_START).
+    if SEND_ON_START:
+        print("[info] SEND_ON_START включён — отправляю тестовую подборку сейчас.")
+        try:
+            send_digest()
+        except Exception as e:
+            print(f"[error] сбой при тестовой рассылке: {e}")
 
     while True:
         wait, nxt = seconds_until_next_run(times)
