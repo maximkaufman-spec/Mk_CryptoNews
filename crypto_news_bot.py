@@ -2,21 +2,24 @@
 # -*- coding: utf-8 -*-
 """
 Крипто-новости -> Telegram bot
-Отправляет ТОП-10 свежих крипто-новостей на русском 3 раза в день:
-в 10:00, 15:00 и 18:00 по киевскому времени.
+Присылает топ-новости на русском отдельными постами (картинка + краткое
+описание + ссылка «Читать»), как в новостных Telegram-каналах.
+По умолчанию 3 раза в день: 10:00, 15:00, 18:00 по киевскому времени.
 
 Переменные окружения (Railway -> Variables):
   BOT_TOKEN         - токен бота от @BotFather
-  CHAT_ID           - куда слать (узнать у @userinfobot)
+  CHAT_IDS          - ID получателей через запятую (или старая CHAT_ID)
   SEND_TIMES        - (необязательно) время рассылки, напр. "10:00,15:00,18:00"
   TOP_N             - (необязательно) сколько новостей за раз, по умолчанию 10
   TIMEZONE          - (необязательно) часовой пояс, по умолчанию Europe/Kiev
-  TZ_OFFSET_HOURS   - (запасной вариант, если TIMEZONE не сработает) напр. 3
+  TZ_OFFSET_HOURS   - (запасной сдвиг, если TIMEZONE не сработает) напр. 3
+  SEND_ON_START     - "1" чтобы прислать тестовую подборку сразу при запуске
 
 Только стандартная библиотека Python (+ tzdata для часового пояса).
 """
 
 import os
+import re
 import time
 import html
 import json
@@ -27,21 +30,11 @@ import xml.etree.ElementTree as ET
 
 # ============ НАСТРОЙКИ ============
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-# Получатели: одно или несколько ID через запятую.
-# Поддерживаются обе переменные — CHAT_IDS (список) и старая CHAT_ID (один).
 CHAT_IDS = os.environ.get("CHAT_IDS", "") or os.environ.get("CHAT_ID", "")
-
-# Время рассылки (часы:минуты), через запятую.
 SEND_TIMES = os.environ.get("SEND_TIMES", "10:00,15:00,18:00")
-
-# Сколько топ-новостей отправлять за один раз.
 TOP_N = int(os.environ.get("TOP_N", "10"))
-
-# Часовой пояс.
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kiev")
 TZ_OFFSET_HOURS = float(os.environ.get("TZ_OFFSET_HOURS", "3"))
-
-# Если "1"/"true"/"yes" — прислать тестовую подборку сразу при запуске.
 SEND_ON_START = os.environ.get("SEND_ON_START", "").strip().lower() in ("1", "true", "yes", "on")
 
 # РУССКОЯЗЫЧНЫЕ крипто-новостные RSS-ленты.
@@ -53,10 +46,11 @@ FEEDS = [
 # ==================================
 
 USER_AGENT = "Mozilla/5.0 (CryptoNewsBot)"
+CAPTION_LIMIT = 1000   # запас под лимит подписи Telegram (1024)
+DESC_LIMIT = 350       # сколько символов описания оставлять
 
 
 def get_tz():
-    """Часовой пояс: сначала пробуем zoneinfo, иначе фиксированный сдвиг."""
     try:
         from zoneinfo import ZoneInfo
         return ZoneInfo(TIMEZONE)
@@ -69,8 +63,11 @@ def get_tz():
 TZ = get_tz()
 
 
+def get_recipients():
+    return [c.strip() for c in CHAT_IDS.split(",") if c.strip()]
+
+
 def parse_send_times():
-    """Разбирает SEND_TIMES в список (час, минута)."""
     result = []
     for chunk in SEND_TIMES.split(","):
         chunk = chunk.strip()
@@ -82,39 +79,50 @@ def parse_send_times():
 
 
 def seconds_until_next_run(times):
-    """Сколько секунд до ближайшего времени рассылки."""
     now = dt.datetime.now(TZ)
     candidates = []
     for (h, m) in times:
         run = now.replace(hour=h, minute=m, second=0, microsecond=0)
         if run <= now:
-            run = run + dt.timedelta(days=1)  # уже прошло сегодня — берём завтра
+            run = run + dt.timedelta(days=1)
         candidates.append(run)
     nxt = min(candidates)
     return (nxt - now).total_seconds(), nxt
 
 
-def fetch_feed(url):
-    """Скачивает и парсит одну RSS-ленту, возвращает список (title, link, pub)."""
-    items = []
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            data = resp.read()
-        root = ET.fromstring(data)
-        for item in root.iter("item"):
-            title = item.findtext("title", default="").strip()
-            link = item.findtext("link", default="").strip()
-            pub = item.findtext("pubDate", default="").strip()
-            if title and link:
-                items.append((title, link, pub))
-    except Exception as e:
-        print(f"[warn] не удалось прочитать ленту {url}: {e}")
-    return items
+def local_tag(tag):
+    """Имя тега без namespace, напр. '{...}content' -> 'content'."""
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def strip_html(text):
+    """Убирает HTML-теги и лишние пробелы из описания."""
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def extract_image(item):
+    """Пытается найти картинку новости в разных форматах RSS."""
+    # 1) enclosure / media:content / media:thumbnail с url
+    for el in item.iter():
+        name = local_tag(el.tag)
+        if name in ("enclosure", "content", "thumbnail"):
+            url = el.attrib.get("url", "")
+            typ = el.attrib.get("type", "")
+            if url and (typ.startswith("image") or re.search(r"\.(jpg|jpeg|png|webp)", url, re.I)):
+                return url
+    # 2) первая <img> внутри description / content:encoded
+    for el in item.iter():
+        if local_tag(el.tag) in ("description", "encoded"):
+            m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', el.text or "", re.I)
+            if m:
+                return m.group(1)
+    return None
 
 
 def parse_date(pub):
-    """Пытается разобрать дату из RSS для сортировки. Если не вышло — очень старая дата."""
     for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z"):
         try:
             return dt.datetime.strptime(pub, fmt)
@@ -123,75 +131,125 @@ def parse_date(pub):
     return dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
 
 
+def fetch_feed(url):
+    """Возвращает список словарей: title, link, pub, desc, image."""
+    items = []
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            data = resp.read()
+        root = ET.fromstring(data)
+        for item in root.iter("item"):
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub = (item.findtext("pubDate") or "").strip()
+            desc = strip_html(item.findtext("description") or "")
+            image = extract_image(item)
+            if title and link:
+                items.append({
+                    "title": title, "link": link, "pub": pub,
+                    "desc": desc, "image": image,
+                })
+    except Exception as e:
+        print(f"[warn] не удалось прочитать ленту {url}: {e}")
+    return items
+
+
 def get_top_news(n):
-    """Собирает новости со всех лент, убирает дубли, возвращает n самых свежих."""
     all_items = []
     seen = set()
     for url in FEEDS:
-        for title, link, pub in fetch_feed(url):
-            if link in seen:
+        for it in fetch_feed(url):
+            if it["link"] in seen:
                 continue
-            seen.add(link)
-            all_items.append((title, link, pub))
-    # Сортируем по дате, свежие сверху.
-    all_items.sort(key=lambda x: parse_date(x[2]), reverse=True)
+            seen.add(it["link"])
+            all_items.append(it)
+    all_items.sort(key=lambda x: parse_date(x["pub"]), reverse=True)
     return all_items[:n]
 
 
-def get_recipients():
-    """Список ID получателей из CHAT_IDS (через запятую)."""
-    return [c.strip() for c in CHAT_IDS.split(",") if c.strip()]
+def build_caption(it):
+    """Формирует подпись поста: заголовок + краткое описание + ссылка."""
+    title = html.escape(it["title"])
+    link = html.escape(it["link"])
+    desc = it["desc"]
+    if len(desc) > DESC_LIMIT:
+        desc = desc[:DESC_LIMIT].rsplit(" ", 1)[0] + "…"
+    desc = html.escape(desc)
+
+    parts = [f"📰 <b>{title}</b>"]
+    if desc:
+        parts.append(desc)
+    parts.append(f'<a href="{link}">➡️ Читать полностью</a>')
+    caption = "\n\n".join(parts)
+    if len(caption) > CAPTION_LIMIT:
+        caption = caption[:CAPTION_LIMIT - 1] + "…"
+    return caption
 
 
-def send_to_chat(chat_id, text):
-    """Отправляет сообщение одному получателю."""
-    api = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = urllib.parse.urlencode({
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": "true",
-    }).encode()
-    req = urllib.request.Request(api, data=payload, headers={"User-Agent": USER_AGENT})
+def tg_request(method, params):
+    api = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    data = urllib.parse.urlencode(params).encode()
+    req = urllib.request.Request(api, data=data, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=25) as resp:
-        result = json.loads(resp.read().decode())
-    if not result.get("ok"):
-        raise RuntimeError(f"Telegram API error: {result}")
-    return result
+        return json.loads(resp.read().decode())
 
 
-def send_telegram(text):
-    """Рассылает сообщение всем получателям. Ошибка одного не ломает остальных."""
-    recipients = get_recipients()
-    ok_count = 0
-    for chat_id in recipients:
+def send_post(chat_id, it):
+    """Отправляет одну новость: фото с подписью, либо текст со ссылкой."""
+    caption = build_caption(it)
+    if it["image"]:
+        res = tg_request("sendPhoto", {
+            "chat_id": chat_id,
+            "photo": it["image"],
+            "caption": caption,
+            "parse_mode": "HTML",
+        })
+        if res.get("ok"):
+            return True
+        # Если картинка «не понравилась» Telegram — шлём текстом с превью.
+        print(f"[warn] фото не отправилось ({res.get('description')}), шлю текстом.")
+    res = tg_request("sendMessage", {
+        "chat_id": chat_id,
+        "text": caption,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "false",  # пусть Telegram сам подтянет превью
+    })
+    return bool(res.get("ok"))
+
+
+def send_text_all(text):
+    """Простое текстовое сообщение всем получателям (для служебных уведомлений)."""
+    for chat_id in get_recipients():
         try:
-            send_to_chat(chat_id, text)
-            ok_count += 1
+            tg_request("sendMessage", {
+                "chat_id": chat_id, "text": text,
+                "parse_mode": "HTML", "disable_web_page_preview": "true",
+            })
         except Exception as e:
-            print(f"[warn] не удалось отправить получателю {chat_id}: {e}")
-    if ok_count == 0 and recipients:
-        raise RuntimeError("не удалось отправить ни одному получателю")
-    return ok_count
+            print(f"[warn] не удалось уведомить {chat_id}: {e}")
 
 
 def send_digest():
-    """Формирует и отправляет подборку топ-новостей одним сообщением."""
+    """Рассылает топ-новости отдельными постами всем получателям."""
     news = get_top_news(TOP_N)
     if not news:
         print("[info] новостей не найдено, пропускаю рассылку.")
         return
+    recipients = get_recipients()
     now_str = dt.datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
-    lines = [f"📢 <b>Топ крипто-новости</b> — {now_str}\n"]
-    for i, (title, link, pub) in enumerate(news, 1):
-        title = html.escape(title)
-        lines.append(f"{i}. <a href=\"{html.escape(link)}\">{title}</a>")
-    message = "\n\n".join(lines)
-    # На всякий случай не превышаем лимит Telegram (~4096 символов).
-    if len(message) > 4000:
-        message = message[:3990] + "…"
-    send_telegram(message)
-    print(f"[ok] отправлена подборка из {len(news)} новостей.")
+    # Заголовок подборки.
+    send_text_all(f"🗞 <b>Крипто-новости</b> — {now_str}")
+    sent = 0
+    for it in news:
+        for chat_id in recipients:
+            try:
+                if send_post(chat_id, it):
+                    sent += 1
+            except Exception as e:
+                print(f"[warn] пост не ушёл получателю {chat_id}: {e}")
+        time.sleep(1)  # пауза, чтобы не упереться в лимиты Telegram
+    print(f"[ok] разослано {len(news)} новостей ({sent} доставок).")
 
 
 def main():
@@ -199,20 +257,19 @@ def main():
         print("❌ Не заданы BOT_TOKEN и/или CHAT_IDS. На Railway добавь их во вкладке Variables.")
         return
 
-    print(f"[info] получателей: {len(get_recipients())}")
     times = parse_send_times()
     times_str = ", ".join(f"{h:02d}:{m:02d}" for h, m in times)
-    print(f"✅ Бот запущен. Рассылка топ-{TOP_N} новостей в: {times_str} ({TIMEZONE}).")
+    print(f"✅ Бот запущен. Получателей: {len(get_recipients())}. "
+          f"Рассылка топ-{TOP_N} новостей в: {times_str} ({TIMEZONE}).")
 
     try:
-        send_telegram(f"🤖 Бот крипто-новостей запущен.\nБуду присылать топ-{TOP_N} новостей "
-                      f"в {times_str} (Киев).")
-        print("✅ Тестовое сообщение отправлено.")
+        send_text_all(f"🤖 Бот крипто-новостей запущен.\nТоп-{TOP_N} новостей "
+                      f"в {times_str} (Киев), отдельными постами с картинками.")
+        print("✅ Стартовое сообщение отправлено.")
     except Exception as e:
-        print(f"❌ Не удалось отправить тестовое сообщение. Проверь BOT_TOKEN и CHAT_IDS.\n   {e}")
+        print(f"❌ Не удалось отправить стартовое сообщение. Проверь BOT_TOKEN и CHAT_IDS.\n   {e}")
         return
 
-    # Тестовая подборка сразу при запуске (если включено SEND_ON_START).
     if SEND_ON_START:
         print("[info] SEND_ON_START включён — отправляю тестовую подборку сейчас.")
         try:
@@ -224,7 +281,6 @@ def main():
         wait, nxt = seconds_until_next_run(times)
         print(f"[info] следующая рассылка: {nxt.strftime('%d.%m %H:%M')} "
               f"(через {int(wait // 60)} мин).")
-        # Спим кусками, чтобы процесс не «зависал» надолго.
         while wait > 0:
             chunk = min(wait, 300)
             time.sleep(chunk)
@@ -233,7 +289,6 @@ def main():
             send_digest()
         except Exception as e:
             print(f"[error] сбой при рассылке: {e}")
-        # Небольшая пауза, чтобы не сработать дважды на одну минуту.
         time.sleep(60)
 
 
