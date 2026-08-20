@@ -27,7 +27,9 @@ import xml.etree.ElementTree as ET
 
 # ============ НАСТРОЙКИ ============
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
+# Получатели: одно или несколько ID через запятую.
+# Поддерживаются обе переменные — CHAT_IDS (список) и старая CHAT_ID (один).
+CHAT_IDS = os.environ.get("CHAT_IDS", "") or os.environ.get("CHAT_ID", "")
 
 # Время рассылки (часы:минуты), через запятую.
 SEND_TIMES = os.environ.get("SEND_TIMES", "10:00,15:00,18:00")
@@ -133,11 +135,16 @@ def get_top_news(n):
     return all_items[:n]
 
 
-def send_telegram(text):
-    """Отправляет сообщение в Telegram."""
+def get_recipients():
+    """Список ID получателей из CHAT_IDS (через запятую)."""
+    return [c.strip() for c in CHAT_IDS.split(",") if c.strip()]
+
+
+def send_to_chat(chat_id, text):
+    """Отправляет сообщение одному получателю."""
     api = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = urllib.parse.urlencode({
-        "chat_id": CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": "true",
@@ -148,6 +155,21 @@ def send_telegram(text):
     if not result.get("ok"):
         raise RuntimeError(f"Telegram API error: {result}")
     return result
+
+
+def send_telegram(text):
+    """Рассылает сообщение всем получателям. Ошибка одного не ломает остальных."""
+    recipients = get_recipients()
+    ok_count = 0
+    for chat_id in recipients:
+        try:
+            send_to_chat(chat_id, text)
+            ok_count += 1
+        except Exception as e:
+            print(f"[warn] не удалось отправить получателю {chat_id}: {e}")
+    if ok_count == 0 and recipients:
+        raise RuntimeError("не удалось отправить ни одному получателю")
+    return ok_count
 
 
 def send_digest():
@@ -170,10 +192,11 @@ def send_digest():
 
 
 def main():
-    if not BOT_TOKEN or not CHAT_ID:
-        print("❌ Не заданы BOT_TOKEN и/или CHAT_ID. На Railway добавь их во вкладке Variables.")
+    if not BOT_TOKEN or not get_recipients():
+        print("❌ Не заданы BOT_TOKEN и/или CHAT_IDS. На Railway добавь их во вкладке Variables.")
         return
 
+    print(f"[info] получателей: {len(get_recipients())}")
     times = parse_send_times()
     times_str = ", ".join(f"{h:02d}:{m:02d}" for h, m in times)
     print(f"✅ Бот запущен. Рассылка топ-{TOP_N} новостей в: {times_str} ({TIMEZONE}).")
